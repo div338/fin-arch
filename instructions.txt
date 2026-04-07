@@ -1,0 +1,227 @@
+Here's the corrected version with escaped backticks in the code blocks:
+
+---
+
+# LifeCompass — Claude Code Technical Specification
+*CTO handoff · April 2026*
+
+---
+
+## Tech Stack
+
+| Layer | Choice | Rationale |
+|---|---|---|
+| Framework | React 18 (Vite scaffold) | Component model matches PRD's reusable input primitives |
+| Styling | Inline styles only | PRD mandate — no CSS class injection, no Tailwind, no stylesheets |
+| Charts | Custom SVG (no libraries) | PRD mandate — full control over bar grouping + color logic |
+| State | useState + useMemo only | No external store needed; all state is single-session |
+| Routing | None (step = integer in state) | 4 screens, no URL persistence required |
+| Build | Vite + @vitejs/plugin-react | Fast HMR, standard JSX transform |
+| Deploy | Static (Vercel / Netlify) | No backend, no auth, no DB — all computation is client-side |
+
+---
+
+## File Structure
+
+    lifecompass/
+    ├── index.html
+    ├── vite.config.js
+    ├── package.json
+    │
+    └── src/
+        ├── main.jsx
+        ├── App.jsx                  # Step router — owns all state
+        │
+        ├── engine/
+        │   ├── constants.js         # All system constants
+        │   ├── formulas.js          # Pure functions: calcFV, calcStepUpSIP,
+        │   │                        #   calcCorpus, expandRecurring,
+        │   │                        #   calcEmergencyHealth, calcIncomeFit,
+        │   │                        #   formatINR, buildWAMessage
+        │   └── deriveFlows.js       # Assembles flows[] from raw state;
+        │                            #   called inside useMemo in App.jsx
+        │
+        ├── components/
+        │   ├── primitives/
+        │   │   ├── Blank.jsx        # Inline text input — underline only
+        │   │   ├── MoneyBlank.jsx   # Blank + superscript L↕Cr toggle
+        │   │   ├── Toggle.jsx       # Pill button group
+        │   │   ├── NumToggle.jsx    # Numeric pill selector (1/2/3 kids)
+        │   │   └── HintText.jsx     # Inline colored hint below prose card
+        │   │
+        │   ├── layout/
+        │   │   ├── Card.jsx
+        │   │   ├── Sec.jsx          # Step 2 section with tinted bg + header
+        │   │   └── Prose.jsx        # Serif paragraph wrapper
+        │   │
+        │   └── results/
+        │       ├── BarChart.jsx     # Custom SVG — grouped/stacked by year
+        │       ├── HealthCard.jsx   # Emergency / Income Fit / Retirement
+        │       ├── OutflowList.jsx  # Milestone prose lines
+        │       └── WhatsAppBtn.jsx  # Pre-fills wa.me message from flows[]
+        │
+        └── screens/
+            ├── Landing.jsx          # Step 0
+            ├── Baseline.jsx         # Step 1
+            ├── Goals.jsx            # Step 2
+            └── Results.jsx          # Step 3 — dark theme
+
+---
+
+## State Architecture (App.jsx)
+
+Step 1 — Baseline:
+
+    inc, exp, sav  →  each: { v: string, u: 'lakh' | 'crore' }
+    age            →  string
+
+Step 2 — Retirement:
+
+    rTog   →  'do' | 'undecided' | null
+    rAge   →  string
+    rInc   →  { v: string, u: 'lakh' | 'crore' }
+
+Step 2 — Children:
+
+    kTog   →  'plan' | 'dont' | null
+    nKid   →  1 | 2 | 3
+    kYrs   →  string[]   // years until birth, one per child
+
+Step 2 — Lifestyle Goals:
+
+    goals  →  Array<{ id, type, cost:{v,u}, freq:'once'|'every', yrs:string }>
+
+Navigation:
+
+    step   →  0 | 1 | 2 | 3
+
+Derived (useMemo):
+
+    flows  →  deriveFlows({ inc, exp, sav, age, rTog, rAge, rInc, kTog, nKid, kYrs, goals })
+
+---
+
+## engine/constants.js
+
+    EDU_INFLATION     = 0.10
+    STD_INFLATION     = 0.06
+    PORTFOLIO_RETURN  = 0.12
+    STEP_UP_RATE      = 0.10
+    BASE_COLLEGE_INR  = 2_000_000    // ₹20L
+    SWR_MULTIPLIER    = 300
+    SIP_CAP_YEARS     = 30
+    EMERGENCY_TARGET  = 6            // months
+    RECURRING_HORIZON = 40           // years
+
+---
+
+## engine/formulas.js — Pure Function Signatures
+
+    toINR({ v, u })
+    // Converts MoneyBlank state to raw INR number
+
+    calcFV(presentCost, inflationRate, yearsAway)
+    // Future value of a one-time goal → number
+
+    calcStepUpSIP(fv, yearsToGoal)
+    // Step-Up SIP for a single goal → number (0 if yearsToGoal > SIP_CAP_YEARS)
+
+    calcCorpus(desiredMonthlyToday, yearsToRetirement)
+    // Retirement corpus → number
+
+    calcEmergencyHealth(savingsINR, monthlyExpINR)
+    // → { months, status: 'healthy'|'building'|'critical', gap }
+
+    calcIncomeFit(totalSIP, monthlyIncomeINR)
+    // → { pct, status: 'comfortable'|'stretch'|'tough' }
+
+    expandRecurring(goal, horizonYrs)
+    // Expands a recurring lifestyle goal into individual Goal instances → Goal[]
+
+    formatINR(n)
+    // ₹X.XX Cr / ₹X.XX L / ₹X,XXX
+
+    buildWAMessage(flows, totalSIP)
+    // Returns pre-filled WhatsApp string
+
+---
+
+## engine/deriveFlows.js
+
+Assembles the flows[] array — the single source of truth for all results screens.
+
+Flow shape:
+
+    {
+      id:           string,
+      label:        string,       // e.g. "Child 1 — College"
+      type:         'retirement' | 'education' | 'lifestyle',
+      yearAway:     number,
+      calendarYear: number,
+      fv:           number,
+      sip:          number,       // 0 if yearAway > SIP_CAP_YEARS
+      emoji:        string
+    }
+
+Assembly rules:
+
+- Retirement → exactly one flow (or zero if rTog !== 'do')
+- Each child → one flow at yearsToBirth + 18, using EDU_INFLATION on BASE_COLLEGE_INR
+- Lifestyle goals with freq === 'every' → expanded via expandRecurring()
+- Flows with yearAway > SIP_CAP_YEARS → sip = 0, still appear in chart + outflow list
+- totalSIP = sum of all flow.sip values
+
+---
+
+## Component Critical Rules (PRD §7)
+
+1. All components defined at module level — never inside App or another component. React remounts on every render otherwise, destroying input focus.
+2. No IIFEs in JSX — pre-compute all conditional JSX as named const variables above return.
+3. Inline styles only — no className, no style tag injection.
+4. MoneyBlank inputs store strings — parseFloat() only inside engine/ at calculation time.
+5. Blank width — use hidden span mirror pattern: render typed value in invisible span, read offsetWidth, apply to input. Avoid ch units (unreliable with serif fonts).
+
+---
+
+## BarChart.jsx — SVG Logic
+
+- Group flows[] by yearAway → chart columns
+- Each column: stacked rects — retirement on top (orange #fb923c), education/lifestyle below (indigo #c7d2fe)
+- Bars with total FV > ₹50L get a 4px dark cap (#ea580c retirement, #4f46e5 goals)
+- Y-axis: 3 labels — 0, 50% of max, max (formatted with formatINR)
+- X-axis: "Yr N" + "(YYYY)" in small sans-serif
+- Wrap chart in overflowX: 'auto' div for mobile scroll
+
+---
+
+## WhatsApp Share
+
+    const waText = encodeURIComponent(buildWAMessage(flows, totalSIP))
+    const waURL  = `https://wa.me/?text=${waText}`
+
+---
+
+## Testing Surface
+
+All engine/ functions are pure — no React, no DOM. Test with Vitest.
+
+    src/engine/__tests__/
+      formulas.test.js
+      deriveFlows.test.js
+
+Minimum cases to cover:
+
+- SIP cap boundary (exactly 30 years)
+- Recurring goal expansion across 40-year horizon
+- Emergency fund at each threshold boundary
+- Corpus calculation with yearsToRetirement = 0 (edge case)
+- formatINR at Cr/L/sub-L boundaries
+
+---
+
+## Intentionally Out of Scope
+
+- No backend, no API — fully client-side
+- No analytics — add Plausible/Posthog later as a thin wrapper
+- No i18n — INR and Indian number system hardcoded
+- Roadmap features (delay cost, PDF export, SIP visualizer) — do not scaffold; add clean later
